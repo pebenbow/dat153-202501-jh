@@ -138,3 +138,65 @@ class PriceData(Base):
 # Create all tables
 Base.metadata.create_all(engine)
 
+
+#########################################################################
+# Part 3: define functions to load data into our database
+#########################################################################
+
+# Create a sessionmaker factory which defines how sessions are created
+Session = sessionmaker(bind=engine)
+
+# Define a function to get or create companies
+def get_or_create_company(session, symbol: str, company_data: dict = None) -> int:
+    """Get existing company or create new company"""
+    
+    # 1. Query database for existing company
+    company = session.query(CompanyData).filter_by(symbol=symbol).first()
+    
+    # 2. If company doesn't exist, create it
+    if not company:
+        # Remove symbol from company_data to avoid duplicate
+        clean_company_data = company_data.copy() if company_data else {}
+        clean_company_data.pop('symbol', None)  # Remove symbol if it exists
+        
+        company = CompanyData(symbol=symbol, **clean_company_data)
+
+        # push the company data to the DB and use .flush() to assign an ID
+        session.add(company)
+        session.flush()
+    
+    # 3. Return the company_id (whether existing or newly created)
+    return company.company_id
+
+# Define a function to load price data
+def load_price_data(df: pl.DataFrame, symbol: str, company_info: dict = None):
+    """Load price data with foreign key"""
+    
+    # Generate a new session object
+    session = Session()
+    
+    try:
+        # Get or create company
+        company_id = get_or_create_company(session, symbol, company_info)
+        
+        # Add company_id to dataframe and convert to records
+        records = df.with_columns(
+            pl.lit(company_id).alias('company_id')
+        ).to_dicts()
+        
+        # Bulk insert using SQLAlchemy Core
+        from sqlalchemy import insert
+        stmt = insert(PriceData).values(records)
+        session.execute(stmt)
+        
+        # Commit the transaction(s)
+        session.commit()
+    
+    # Error-handling exception    
+    except Exception as e:
+        session.rollback()
+        raise e
+      
+    # Close the session
+    finally:
+        session.close()
